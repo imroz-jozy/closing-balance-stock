@@ -212,17 +212,17 @@ class ClosingBalance(models.Model):
 
 class ItemParamDet(models.Model):
     Date = models.CharField(max_length=20)
-    VchType = models.CharField(max_length=10)  # 2 = Purchase, 9 = Sale
-    VchNo = models.CharField(max_length=10)
+    VchType = models.CharField(max_length=20)  # 2 = Purchase, 9 = Sale
+    VchNo = models.CharField(max_length=50)
     Item = models.ForeignKey(master1, on_delete=models.CASCADE)
-    C1 = models.CharField(max_length=50, blank=True)
-    C2 = models.CharField(max_length=50, blank=True)
-    C3 = models.CharField(max_length=50, blank=True)
-    C4 = models.CharField(max_length=50, blank=True)
-    C5 = models.CharField(max_length=50, blank=True)
+    C1 = models.CharField(max_length=100, blank=True)
+    C2 = models.CharField(max_length=100, blank=True)
+    C3 = models.CharField(max_length=100, blank=True)
+    C4 = models.CharField(max_length=100, blank=True)
+    C5 = models.CharField(max_length=100, blank=True)
     D3 = models.FloatField(blank=True, verbose_name="Mrp")
     D4 = models.FloatField(blank=True, verbose_name="sale price")
-    BCN = models.CharField(max_length=50, blank=True)
+    BCN = models.CharField(max_length=100, blank=True)
     Value1 = models.FloatField(default=0, verbose_name="quantity")
 
     def __str__(self):

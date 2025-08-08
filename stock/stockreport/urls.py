@@ -8,7 +8,7 @@ urlpatterns = [
     path('logout/', views.user_logout, name='logout'),
     path('profile/', views.user_profile, name='user_profile'),
     path('check-session/', views.check_session_validity, name='check_session_validity'),
-    
+
     # Main application URLs
     path('', views.home, name='home'),
     path('closing-stock/', views.closing_stock_report, name='closing_stock_report'),
@@ -17,7 +17,7 @@ urlpatterns = [
     path('import-from-desktop/', views.import_from_desktop, name='import_from_desktop'),
     path('item-param-stock/', views.item_param_stock_report, name='item_param_stock_report'),
     path('item-param-summary/', views.item_param_summary_report, name='item_param_summary_report'),
-    
+
     # Export endpoints
     path('export-closing-stock-excel/', views.export_closing_stock_excel, name='export_closing_stock_excel'),
     path('export-closing-stock-pdf/', views.export_closing_stock_pdf, name='export_closing_stock_pdf'),

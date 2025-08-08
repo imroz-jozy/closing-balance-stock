@@ -20,19 +20,74 @@ thead th {
     color: #fff;
     z-index: 2;
 }
+.stats-card {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    border-radius: 1rem;
+    padding: 2rem;
+    margin-bottom: 2rem;
+    color: white;
+    box-shadow: 0 10px 30px rgba(102, 126, 234, 0.3);
+}
+.stats-card h4 {
+    font-size: 2rem;
+    font-weight: bold;
+    margin-bottom: 0.5rem;
+}
+.stats-card p {
+    opacity: 0.9;
+    font-size: 0.9rem;
+}
 </style>
+
 <div class="container-fluid">
     <div class="row">
         <div class="col-12">
-            <h1 class="mb-4">Item Parameter Stock Report</h1>
-            <!-- Back to Summary Button -->
-            <div class="mb-3">
-                <a href="{% url 'item_param_summary_report' %}?data_source={{ data_source }}" class="btn btn-outline-secondary">
-                    <i class="fas fa-arrow-left me-1"></i> Back to Summary
-                </a>
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h1 class="text-primary"><i class="fas fa-chart-bar me-2"></i>Item Parameter Stock Report</h1>
+                <div class="no-print">
+                    <a href="{% url 'item_param_summary_report' %}?data_source={{ data_source }}" class="btn btn-outline-secondary">
+                        <i class="fas fa-arrow-left me-1"></i> Back to Summary
+                    </a>
+                </div>
             </div>
+
+            {% if error_message %}
+            <div class="alert alert-warning alert-dismissible fade show" role="alert">
+                <i class="fas fa-exclamation-triangle me-2"></i>{{ error_message }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
+            {% endif %}
+
+            <!-- Statistics Cards -->
+            <div class="stats-card no-print">
+                <div class="row text-center">
+                    <div class="col-md-3">
+                        <h4><i class="fas fa-boxes me-2"></i>{{ total_records }}</h4>
+                        <p class="mb-0">Total Records</p>
+                    </div>
+                    <div class="col-md-3">
+                        <h4><i class="fas fa-plus-circle me-2"></i>{{ total_opening|floatformat:2 }}</h4>
+                        <p class="mb-0">Total Opening</p>
+                    </div>
+                    <div class="col-md-3">
+                        <h4><i class="fas fa-arrow-up me-2"></i>{{ total_in|floatformat:2 }}</h4>
+                        <p class="mb-0">Total In</p>
+                    </div>
+                    <div class="col-md-3">
+                        <h4><i class="fas fa-arrow-down me-2"></i>{{ total_out|floatformat:2 }}</h4>
+                        <p class="mb-0">Total Out</p>
+                    </div>
+                </div>
+                <div class="row text-center mt-3">
+                    <div class="col-md-12">
+                        <h4><i class="fas fa-calculator me-2"></i>{{ total_closing|floatformat:2 }}</h4>
+                        <p class="mb-0">Total Closing</p>
+                    </div>
+                </div>
+            </div>
+
             <!-- Filter/Search Bar -->
-            <form method="get" class="row g-3 mb-3">
+            <form method="get" class="row g-3 mb-3 no-print">
                 <div class="col-md-2">
                     <label for="data_source" class="form-label">Data Source</label>
                     <select class="form-select" id="data_source" name="data_source">
@@ -45,32 +100,58 @@ thead th {
                     <select class="form-select" id="item_id" name="item_id">
                         <option value="">All Items</option>
                         {% for item in all_items %}
-                        <option value="{{ item.id }}" {% if item.id|stringformat:'s' == selected_item_id %}selected{% endif %}>{{ item.name }}</option>
+                        <option value="{{ item.id }}" {% if item.id == selected_item_id %}selected{% endif %}>{{ item.name }}</option>
                         {% endfor %}
                     </select>
                 </div>
                 <div class="col-md-2">
                     <label for="bcn" class="form-label">BCN</label>
-                    <input type="text" class="form-control" id="bcn" name="bcn" value="{{ selected_bcn|default:'' }}" placeholder="BCN">
+                    <input type="text" class="form-control" id="bcn" name="bcn" value="{{ selected_bcn }}" placeholder="Enter BCN">
                 </div>
-                <div class="col-md-3">
+                <div class="col-md-2">
                     <label for="search" class="form-label">Search</label>
-                    <input type="text" class="form-control" id="search" name="search" value="{{ search|default:'' }}" placeholder="Search by item, BCN, or parameter">
+                    <input type="text" class="form-control" id="search" name="search" value="{{ search }}" placeholder="Search items...">
                 </div>
-                <div class="col-md-3 d-flex align-items-end">
-                    <button type="submit" class="btn btn-primary w-100"><i class="fas fa-search me-1"></i> Filter</button>
+                <div class="col-md-2">
+                    <label class="form-label">&nbsp;</label>
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="hide_zero_qty" name="hide_zero_qty" value="true" {% if hide_zero_qty %}checked{% endif %}>
+                        <label class="form-check-label" for="hide_zero_qty">Hide Zero Qty</label>
+                    </div>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">&nbsp;</label>
+                    <div class="d-grid">
+                        <button type="submit" class="btn btn-primary">
+                            <i class="fas fa-search me-1"></i> Filter
+                        </button>
+                    </div>
                 </div>
             </form>
-            <!-- Print/Export Buttons -->
-            <div class="mb-3 no-print">
-                <button class="btn btn-secondary me-2" onclick="window.print()"><i class="fas fa-print me-1"></i> Print</button>
-                <!-- Export buttons can be implemented as needed -->
+
+            <!-- Export Options -->
+            <div class="no-print mb-3">
+                <div class="btn-group" role="group">
+                    <button type="button" class="btn btn-success" onclick="exportToExcel()">
+                        <i class="fas fa-file-excel me-1"></i> Export Excel
+                    </button>
+                    <button type="button" class="btn btn-danger" onclick="exportToPDF()">
+                        <i class="fas fa-file-pdf me-1"></i> Export PDF
+                    </button>
+                    <button type="button" class="btn btn-info" onclick="window.print()">
+                        <i class="fas fa-print me-1"></i> Print
+                    </button>
+                </div>
             </div>
-            <!-- Table -->
-            <div class="table-responsive">
+
+            <!-- Data Table -->
+            <div class="card">
+                <div class="card-header bg-dark text-white">
+                    <h5 class="mb-0"><i class="fas fa-table me-2"></i>Item Parameter Stock Details ({{ total_records }} records)</h5>
+                </div>
                 <div class="scroll-table-wrapper">
                     <table class="table table-striped table-hover mb-0">
-                        <thead>
+                        <thead class="table-dark">
                             <tr>
                                 <th>Item Name</th>
                                 <th>BCN</th>
@@ -88,44 +169,58 @@ thead th {
                             </tr>
                         </thead>
                         <tbody>
-                            {% for row in results %}
+                            {% for result in results %}
                             <tr>
-                                <td>{{ row.item.name }}</td>
-                                <td>{{ row.bcn }}</td>
-                                <td>{{ row.params.C1 }}</td>
-                                <td>{{ row.params.C2 }}</td>
-                                <td>{{ row.params.C3 }}</td>
-                                <td>{{ row.params.C4 }}</td>
-                                <td>{{ row.params.C5 }}</td>
-                                <td>{{ row.mrp|floatformat:2 }}</td>
-                                <td>{{ row.sale_price|floatformat:2 }}</td>
-                                <td>{{ row.opening|floatformat:2 }}</td>
-                                <td>{{ row.in_qty|floatformat:2 }}</td>
-                                <td>{{ row.out_qty|floatformat:2 }}</td>
-                                <td>{{ row.closing|floatformat:2 }}</td>
+                                <td>{{ result.item.name }}</td>
+                                <td>{{ result.bcn|default:"-" }}</td>
+                                <td>{{ result.params.C1|default:"-" }}</td>
+                                <td>{{ result.params.C2|default:"-" }}</td>
+                                <td>{{ result.params.C3|default:"-" }}</td>
+                                <td>{{ result.params.C4|default:"-" }}</td>
+                                <td>{{ result.params.C5|default:"-" }}</td>
+                                <td>{{ result.mrp|floatformat:2 }}</td>
+                                <td>{{ result.sale_price|floatformat:2 }}</td>
+                                <td>{{ result.opening|floatformat:2 }}</td>
+                                <td>{{ result.in_qty|floatformat:2 }}</td>
+                                <td>{{ result.out_qty|floatformat:2 }}</td>
+                                <td>{{ result.closing|floatformat:2 }}</td>
                             </tr>
                             {% empty %}
                             <tr>
-                                <td colspan="13" class="text-center">No data available</td>
+                                <td colspan="13" class="text-center text-muted py-4">
+                                    <i class="fas fa-inbox fa-2x mb-2"></i><br>
+                                    No parameter stock data found
+                                </td>
                             </tr>
                             {% endfor %}
                         </tbody>
+                        {% if results %}
+                        <tfoot class="table-secondary">
+                            <tr>
+                                <th colspan="9">Total</th>
+                                <th>{{ total_opening|floatformat:2 }}</th>
+                                <th>{{ total_in|floatformat:2 }}</th>
+                                <th>{{ total_out|floatformat:2 }}</th>
+                                <th>{{ total_closing|floatformat:2 }}</th>
+                            </tr>
+                        </tfoot>
+                        {% endif %}
                     </table>
                 </div>
-                <!-- Totals row below the scroll bar -->
-                <table class="table table-bordered mb-0" style="background: #f8f9fa;">
-                    <tfoot>
-                        <tr>
-                            <th class="text-end" colspan="9">Total</th>
-                            <th>{{ total_opening|floatformat:2 }}</th>
-                            <th>{{ total_in|floatformat:2 }}</th>
-                            <th>{{ total_out|floatformat:2 }}</th>
-                            <th>{{ total_closing|floatformat:2 }}</th>
-                        </tr>
-                    </tfoot>
-                </table>
             </div>
         </div>
     </div>
 </div>
+
+<script>
+function exportToExcel() {
+    const params = new URLSearchParams(window.location.search);
+    window.location.href = '/export-item-param-stock-excel/?' + params.toString();
+}
+
+function exportToPDF() {
+    const params = new URLSearchParams(window.location.search);
+    window.location.href = '/export-item-param-stock-pdf/?' + params.toString();
+}
+</script>
 {% endblock %}

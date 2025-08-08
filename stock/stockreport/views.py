@@ -66,8 +66,13 @@ def execute_query_user(query_type='tran2', user=None):
     queries = {
         'tran2': "SELECT MasterCode1,VchType,RecType,VchNo,Date,Value1,Value3 FROM Tran2",
         'master1': "SELECT Code, MasterType, Name FROM Master1 WHERE MasterType IN (2,6,9)",
-        'folio1': "SELECT MasterCode, MasterType, D1, D3 FROM folio1 WHERE MasterType in (2,6)"
+        'folio1': "SELECT MasterCode, MasterType, D1, D3 FROM folio1 WHERE MasterType in (2,6)",
+        'itemparamdet': "SELECT Date, VchType, VchNo, ItemCode, C1, C2, C3, C4, C5, D3, D4, BCN, Value1 FROM itemParamDet"
     }
+    
+    if query_type not in queries:
+        raise ValueError(f"Unknown query type: {query_type}")
+    
     query = queries[query_type]
 
     # Handle named instance (if port is blank) or host:port
@@ -84,11 +89,19 @@ def execute_query_user(query_type='tran2', user=None):
         f"PWD={api_config.password};"
         "TrustServerCertificate=yes;"
     )
-    with pyodbc.connect(conn_str) as conn:
-        cursor = conn.cursor()
-        cursor.execute(query)
-        columns = [column[0] for column in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+    
+    try:
+        with pyodbc.connect(conn_str) as conn:
+            cursor = conn.cursor()
+            cursor.execute(query)
+            columns = [column[0] for column in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+    except Exception as e:
+        if query_type == 'itemparamdet':
+            # ItemParamDet table might not exist, return empty list
+            return []
+        else:
+            raise e
 
 
 def user_signup(request):
@@ -263,6 +276,20 @@ def home(request):
             'url': 'closing_balance_report',
             'icon': 'fas fa-balance-scale',
             'color': 'success'
+        },
+        {
+            'name': 'Parameter Summary Report',
+            'description': 'View item parameter summary with drill-down to detailed parameter breakdown',
+            'url': 'item_param_summary_report',
+            'icon': 'fas fa-list-alt',
+            'color': 'info'
+        },
+        {
+            'name': 'Parameter Stock Report',
+            'description': 'Detailed parameter-wise stock report with BCN and characteristics breakdown',
+            'url': 'item_param_stock_report',
+            'icon': 'fas fa-chart-bar',
+            'color': 'warning'
         }
     ]
     
@@ -944,6 +971,50 @@ def import_from_desktop(request):
         messages.success(request, f"Successfully imported {folio1_imported_count} folio1 records")
         if folio1_error_count > 0:
             messages.warning(request, f"{folio1_error_count} folio1 records had errors during import.")
+
+        # Step 4: Import ItemParamDet data (AFTER master1)
+        try:
+            itemparamdet_xml_response = execute_query_user(query_type='itemparamdet', user=request.user)
+            if itemparamdet_xml_response:
+                from .models import ItemParamDet
+                
+                old_itemparamdet_count = ItemParamDet.objects.count()
+                ItemParamDet.objects.all().delete()
+                messages.info(request, f"Cleared {old_itemparamdet_count} ItemParamDet records")
+
+                itemparamdet_imported_count = 0
+                itemparamdet_error_count = 0
+                
+                for entry in itemparamdet_xml_response:
+                    try:
+                        master_instance = master1.objects.get(code=int(entry['ItemCode']))
+                        ItemParamDet.objects.create(
+                            Date=entry.get('Date', ''),
+                            VchType=entry.get('VchType', ''),
+                            VchNo=entry.get('VchNo', ''),
+                            Item=master_instance,
+                            C1=entry.get('C1', ''),
+                            C2=entry.get('C2', ''),
+                            C3=entry.get('C3', ''),
+                            C4=entry.get('C4', ''),
+                            C5=entry.get('C5', ''),
+                            D3=float(entry.get('D3', 0)),
+                            D4=float(entry.get('D4', 0)),
+                            BCN=entry.get('BCN', ''),
+                            Value1=float(entry.get('Value1', 0))
+                        )
+                        itemparamdet_imported_count += 1
+                    except Exception as e:
+                        itemparamdet_error_count += 1
+                        messages.warning(request, f"Error importing ItemParamDet record: {str(e)}")
+
+                messages.success(request, f"Successfully imported {itemparamdet_imported_count} ItemParamDet records")
+                if itemparamdet_error_count > 0:
+                    messages.warning(request, f"{itemparamdet_error_count} ItemParamDet records had errors during import.")
+            else:
+                messages.warning(request, "No ItemParamDet data found in external source.")
+        except Exception as e:
+            messages.warning(request, f"Error importing ItemParamDet data: {str(e)}")
 
     except Exception as e:
         messages.error(request, f"Import failed: {str(e)}")
@@ -2095,229 +2166,354 @@ VOUCHER_TYPE_MAP = {
 def item_param_stock_report(request):
     """
     Report for closing stock of items using ItemParamDet, with BCN and parameter breakdown.
-    - VchType==2 is treated as opening.
+    - VchType==12 is treated as opening.
     - Shows totals, scroll, search, export, print, etc.
     """
     from .models import ItemParamDet, master1
-    from django.db.models import F, Q
+    from django.db.models import F, Q, Sum
     from .services import LiveSQLService
 
     # Filters
     item_id = request.GET.get('item_id')
-    bcn = request.GET.get('bcn')
+    bcn = request.GET.get('bcn', '').strip()
     search = request.GET.get('search', '').strip()
     data_source = request.GET.get('data_source', 'live')  # default to live
+    hide_zero_qty = request.GET.get('hide_zero_qty', 'false').lower() == 'true'
 
     results = []
     total_opening = total_in = total_out = total_closing = 0
-    all_items = master1.objects.filter(mastertype=6).order_by('name')
+    all_items = []
+    error_message = None
 
-    if data_source == 'live':
-        live_service = LiveSQLService(user=request.user)
-        live_rows = live_service.get_item_param_stock_live(item_id, bcn, search)
-        # Group and aggregate like ORM logic
-        stock_data = {}
-        for row in live_rows:
-            key = (row['item_id'], row['bcn'])
-            if key not in stock_data:
-                stock_data[key] = {
-                    'item': type('obj', (), {'id': row['item_id'], 'name': row['item_name']})(),
-                    'bcn': row['bcn'],
-                    'params': {'C1': row['C1'], 'C2': row['C2'], 'C3': row['C3'], 'C4': row['C4'], 'C5': row['C5']},
-                    'mrp': row['mrp'],
-                    'sale_price': row['sale_price'],
-                    'opening': 0,
-                    'in_qty': 0,
-                    'out_qty': 0,
-                    'closing': 0,
-                }
-            # Opening
-            if str(row['vch_type']) == '12':
-                stock_data[key]['opening'] += row['quantity']
-            # In/Out
-            elif str(row['vch_type']) in ['3','4','5','6','7','8','9','10','11','13','14','15','16','17','18','19','21','22','26','27','28','29','30','31','32','61']:
-                qty = row['quantity']
-                if qty >= 0:
-                    stock_data[key]['in_qty'] += qty
-                else:
-                    stock_data[key]['out_qty'] += abs(qty)
-            # Closing = opening + in - out
-            stock_data[key]['closing'] = stock_data[key]['opening'] + stock_data[key]['in_qty'] - stock_data[key]['out_qty']
-        results = list(stock_data.values())
+    try:
+        if data_source == 'live':
+            try:
+                live_service = LiveSQLService(user=request.user)
+                
+                # Get all items for dropdown (from master1 via live connection)
+                with live_service.get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT Code, Name FROM Master1 WHERE MasterType = 6 ORDER BY Name")
+                    all_items = [{'id': row[0], 'name': row[1], 'code': row[0]} for row in cursor.fetchall()]
+                
+                # Get item parameter data
+                live_rows = live_service.get_item_param_stock_live(item_id, bcn, search)
+                
+                # Group and aggregate
+                stock_data = {}
+                for row in live_rows:
+                    # Create unique key for each item-parameter combination
+                    key = (
+                        row['item_id'], 
+                        row.get('bcn', ''),
+                        row.get('C1', ''),
+                        row.get('C2', ''),
+                        row.get('C3', ''),
+                        row.get('C4', ''),
+                        row.get('C5', '')
+                    )
+                    
+                    if key not in stock_data:
+                        stock_data[key] = {
+                            'item': type('obj', (), {
+                                'id': row['item_id'], 
+                                'name': row['item_name'], 
+                                'code': row['item_id']
+                            })(),
+                            'bcn': row.get('bcn', ''),
+                            'params': {
+                                'C1': row.get('C1', ''),
+                                'C2': row.get('C2', ''),
+                                'C3': row.get('C3', ''),
+                                'C4': row.get('C4', ''),
+                                'C5': row.get('C5', '')
+                            },
+                            'mrp': float(row.get('mrp', 0)),
+                            'sale_price': float(row.get('sale_price', 0)),
+                            'opening': 0,
+                            'in_qty': 0,
+                            'out_qty': 0,
+                            'closing': 0,
+                        }
+                    
+                    qty = float(row.get('quantity', 0))
+                    vch_type = str(row.get('vch_type', ''))
+                    
+                    # Opening (VchType 12)
+                    if vch_type == '12':
+                        stock_data[key]['opening'] += qty
+                    # Other transactions
+                    else:
+                        if qty >= 0:
+                            stock_data[key]['in_qty'] += qty
+                        else:
+                            stock_data[key]['out_qty'] += abs(qty)
+                
+                # Calculate closing for each item
+                for key in stock_data:
+                    stock_data[key]['closing'] = (stock_data[key]['opening'] + 
+                                                stock_data[key]['in_qty'] - 
+                                                stock_data[key]['out_qty'])
+                
+                results = list(stock_data.values())
+                
+            except Exception as e:
+                error_message = f"Live data error: {str(e)}"
+                data_source = 'imported'  # Fallback to imported data
+        
+        if data_source == 'imported' or (not results and not error_message):
+            # Get all items for dropdown when using imported data
+            if not all_items:
+                all_items = master1.objects.filter(mastertype=6).order_by('name')
+            
+            # Use imported data
+            # Check if ItemParamDet table has any data
+            total_param_records = ItemParamDet.objects.count()
+            
+            if total_param_records == 0:
+                error_message = "No ItemParamDet data found in database. Please import data first using 'Import from Desktop'."
+                results = []
+            else:
+                qs = ItemParamDet.objects.select_related('Item')
+                
+                # Apply filters
+                if item_id:
+                    qs = qs.filter(Item_id=item_id)
+                if bcn:
+                    qs = qs.filter(BCN__icontains=bcn)
+                if search:
+                    qs = qs.filter(
+                        Q(Item__name__icontains=search) |
+                        Q(BCN__icontains=search) |
+                        Q(C1__icontains=search) |
+                        Q(C2__icontains=search) |
+                        Q(C3__icontains=search) |
+                        Q(C4__icontains=search) |
+                        Q(C5__icontains=search)
+                    )
+                
+                # Group by Item, BCN and parameters
+                stock_data = {}
+                for row in qs:
+                    # Create a unique key for each combination
+                    key = (row.Item.id, row.BCN or '', row.C1 or '', row.C2 or '', row.C3 or '', row.C4 or '', row.C5 or '')
+                    
+                    if key not in stock_data:
+                        stock_data[key] = {
+                            'item': row.Item,
+                            'bcn': row.BCN or '',
+                            'params': {
+                                'C1': row.C1 or '',
+                                'C2': row.C2 or '',
+                                'C3': row.C3 or '',
+                                'C4': row.C4 or '',
+                                'C5': row.C5 or ''
+                            },
+                            'mrp': float(row.D3 or 0),
+                            'sale_price': float(row.D4 or 0),
+                            'opening': 0,
+                            'in_qty': 0,
+                            'out_qty': 0,
+                            'closing': 0,
+                        }
+                    
+                    qty = float(row.Value1 or 0)
+                    vch_type = str(row.VchType)
+                    
+                    # Opening (VchType 12)
+                    if vch_type == '12':
+                        stock_data[key]['opening'] += qty
+                    # Other transactions
+                    else:
+                        if qty >= 0:
+                            stock_data[key]['in_qty'] += qty
+                        else:
+                            stock_data[key]['out_qty'] += abs(qty)
+                
+                # Calculate closing for each item
+                for key in stock_data:
+                    stock_data[key]['closing'] = (stock_data[key]['opening'] + 
+                                                stock_data[key]['in_qty'] - 
+                                                stock_data[key]['out_qty'])
+                
+                results = list(stock_data.values())
+        
+        # Filter out zero quantities if requested
+        if hide_zero_qty:
+            results = [r for r in results if r['closing'] != 0]
+        
+        # Calculate totals
         total_opening = sum(r['opening'] for r in results)
         total_in = sum(r['in_qty'] for r in results)
         total_out = sum(r['out_qty'] for r in results)
         total_closing = sum(r['closing'] for r in results)
-    else:
-        # Queryset
-        qs = ItemParamDet.objects.all()
-        if item_id:
-            qs = qs.filter(Item_id=item_id)
-        if bcn:
-            qs = qs.filter(BCN=bcn)
-        if search:
-            qs = qs.filter(Q(Item__name__icontains=search) | Q(BCN__icontains=search) | Q(C1__icontains=search) | Q(C2__icontains=search) | Q(C3__icontains=search) | Q(C4__icontains=search) | Q(C5__icontains=search))
-        # Group by Item and BCN, sum Value1 (quantity)
-        stock_data = {}
-        for row in qs:
-            item = row.Item
-            bcn_val = row.BCN
-            key = (item.id, bcn_val)
-            if key not in stock_data:
-                stock_data[key] = {
-                    'item': item,
-                    'bcn': bcn_val,
-                    'params': {'C1': row.C1, 'C2': row.C2, 'C3': row.C3, 'C4': row.C4, 'C5': row.C5},
-                    'mrp': row.D3,
-                    'sale_price': row.D4,
-                    'opening': 0,
-                    'in_qty': 0,
-                    'out_qty': 0,
-                    'closing': 0,
-                }
-            # Opening
-            if str(row.VchType) == '12':
-                stock_data[key]['opening'] += row.Value1
-            # In/Out
-            elif str(row.VchType) in ['3','4','5','6','7','8','9','10','11','13','14','15','16','17','18','19','21','22','26','27','28','29','30','31','32','61']:
-                qty = row.Value1
-                if qty >= 0:
-                    stock_data[key]['in_qty'] += qty
-                else:
-                    stock_data[key]['out_qty'] += abs(qty)
-            # Closing = opening + in - out
-            stock_data[key]['closing'] = stock_data[key]['opening'] + stock_data[key]['in_qty'] - stock_data[key]['out_qty']
-        results = list(stock_data.values())
-        total_opening = sum(r['opening'] for r in results)
-        total_in = sum(r['in_qty'] for r in results)
-        total_out = sum(r['out_qty'] for r in results)
-        total_closing = sum(r['closing'] for r in results)
+        
+        # Sort results by item name
+        results.sort(key=lambda x: x['item'].name)
+        
+    except Exception as e:
+        error_message = f"Error generating report: {str(e)}"
+        results = []
 
     context = {
         'results': results,
-        'total_opening': total_opening,
-        'total_in': total_in,
-        'total_out': total_out,
-        'total_closing': total_closing,
+        'total_opening': round(total_opening, 2),
+        'total_in': round(total_in, 2),
+        'total_out': round(total_out, 2),
+        'total_closing': round(total_closing, 2),
         'all_items': all_items,
-        'selected_item_id': item_id,
+        'selected_item_id': int(item_id) if item_id else None,
         'selected_bcn': bcn,
         'search': search,
         'data_source': data_source,
+        'hide_zero_qty': hide_zero_qty,
+        'error_message': error_message,
+        'total_records': len(results),
     }
     return render(request, 'stockreport/item_param_stock_report.html', context)
 
 @login_required
 def item_param_summary_report(request):
     """
-    Level 1: Summary report showing items with total closing quantities from itemParamDet.
+    Level 1: Summary report showing items with opening and closing quantities from itemParamDet.
+    Opening qty calculated from VchType=1 records only.
     Clicking on an item will drill down to parameter details.
     """
-    from .models import master1
+    from .models import master1, ItemParamDet
     from .services import LiveSQLService
-    from django.db.models import Q
+    from django.db.models import Q, Sum
 
     # Filters
     search = request.GET.get('search', '').strip()
     bcn = request.GET.get('bcn', '').strip()
-    start_date = request.GET.get('start_date', '').strip()
-    end_date = request.GET.get('end_date', '').strip()
     show_zero_qty = request.GET.get('show_zero_qty') == '1'
     data_source = request.GET.get('data_source', 'live')  # default to live
 
     results = []
-    total_closing_qty = total_closing_val = 0
+    total_opening_qty = total_closing_qty = 0
+    error_message = None
 
-    if data_source == 'live':
-        live_service = LiveSQLService(user=request.user)
-        all_items = master1.objects.filter(mastertype=6).order_by('name')
-        for item in all_items:
-            # Get item parameter data for this specific item
-            item_rows = live_service.get_item_param_stock_live(item_id=item.code, bcn=bcn, search=search, start_date=start_date, end_date=end_date)
-            item_opening = item_in = item_out = 0
-            for row in item_rows:
-                # Optionally filter by date if not handled in live_service
-                if start_date and row.get('date') and row['date'] < start_date:
-                    continue
-                if end_date and row.get('date') and row['date'] > end_date:
-                    continue
-                if bcn and row.get('bcn') and bcn.lower() not in row['bcn'].lower():
-                    continue
-                if search and not (search.lower() in item.name.lower() or any(search.lower() in str(row.get(param, '')).lower() for param in ['bcn', 'C1', 'C2', 'C3', 'C4', 'C5'])):
-                    continue
-                if str(row['vch_type']) == '12':  # Opening
-                    item_opening += row['quantity']
-                elif str(row['vch_type']) in ['3','4','5','6','7','8','9','10','11','13','14','15','16','17','18','19','21','22','26','27','28','29','30','31','32','61']:
-                    qty = row['quantity']
-                    if qty >= 0:
-                        item_in += qty
-                    else:
-                        item_out += abs(qty)
-            item_closing = item_opening + item_in - item_out
-            if (show_zero_qty or item_closing > 0) and (not search or search.lower() in item.name.lower()):
-                results.append({
-                    'item': item,
-                    'opening_qty': item_opening,
-                    'in_qty': item_in,
-                    'out_qty': item_out,
-                    'closing_qty': item_closing,
-                    'closing_value': 0,  # You can add value calculation if needed
-                })
-                total_closing_qty += item_closing
-                total_closing_val += 0  # Add value calculation if needed
-    else:
-        from .models import ItemParamDet
-        all_items = master1.objects.filter(mastertype=6).order_by('name')
-        for item in all_items:
-            item_rows = ItemParamDet.objects.filter(Item=item)
-            if bcn:
-                item_rows = item_rows.filter(BCN__icontains=bcn)
-            if start_date:
-                item_rows = item_rows.filter(Date__gte=start_date)
-            if end_date:
-                item_rows = item_rows.filter(Date__lte=end_date)
-            if search:
-                item_rows = item_rows.filter(
-                    Q(Item__name__icontains=search) |
-                    Q(BCN__icontains=search) |
-                    Q(C1__icontains=search) |
-                    Q(C2__icontains=search) |
-                    Q(C3__icontains=search) |
-                    Q(C4__icontains=search) |
-                    Q(C5__icontains=search)
-                )
-            item_opening = item_in = item_out = 0
-            for row in item_rows:
-                if str(row.VchType) == '12':  # Opening
-                    item_opening += row.Value1
-                elif str(row.VchType) in ['3','4','5','6','7','8','9','10','11','13','14','15','16','17','18','19','21','22','26','27','28','29','30','31','32','61']:
-                    qty = row.Value1
-                    if qty >= 0:
-                        item_in += qty
-                    else:
-                        item_out += abs(qty)
-            item_closing = item_opening + item_in - item_out
-            if show_zero_qty or item_closing > 0:
-                results.append({
-                    'item': item,
-                    'opening_qty': item_opening,
-                    'in_qty': item_in,
-                    'out_qty': item_out,
-                    'closing_qty': item_closing,
-                    'closing_value': 0,  # You can add value calculation if needed
-                })
-                total_closing_qty += item_closing
-                total_closing_val += 0  # Add value calculation if needed
+    try:
+        if data_source == 'live':
+            try:
+                live_service = LiveSQLService(user=request.user)
+                
+                # Get all items from live SQL Server
+                with live_service.get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT Code, Name FROM Master1 WHERE MasterType = 6 ORDER BY Name")
+                    all_items = [{'id': row[0], 'name': row[1], 'code': row[0]} for row in cursor.fetchall()]
+                
+                for item_dict in all_items:
+                    # Get item parameter data for this specific item
+                    item_rows = live_service.get_item_param_stock_live(item_id=item_dict['code'], bcn=bcn, search=search)
+                    item_opening = 0
+                    item_closing = 0
+                    
+                    for row in item_rows:
+                        qty = float(row.get('quantity', 0))
+                        vch_type = str(row.get('vch_type', ''))
+                        
+                        # Opening qty only from VchType=1
+                        if vch_type == '1':
+                            item_opening += qty
+                        
+                        # All transactions contribute to closing
+                        item_closing += qty
+                    
+                    # Apply filters
+                    if search and search.lower() not in item_dict['name'].lower():
+                        continue
+                    if not show_zero_qty and item_closing == 0:
+                        continue
+                    
+                    # Create item object for template compatibility
+                    item_obj = type('obj', (), {
+                        'id': item_dict['id'], 
+                        'name': item_dict['name'], 
+                        'code': item_dict['code']
+                    })()
+                    
+                    results.append({
+                        'item': item_obj,
+                        'opening_qty': round(item_opening, 2),
+                        'closing_qty': round(item_closing, 2),
+                    })
+                    total_opening_qty += item_opening
+                    total_closing_qty += item_closing
+                    
+            except Exception as e:
+                error_message = f"Live data error: {str(e)}"
+                data_source = 'imported'  # Fallback to imported data
+        
+        if data_source == 'imported' or not results:
+            # Use imported data
+            # Check if ItemParamDet table has any data
+            total_param_records = ItemParamDet.objects.count()
+            
+            if total_param_records == 0:
+                error_message = "No ItemParamDet data found in database. Please import data first using 'Import from Desktop'."
+            else:
+                all_items = master1.objects.filter(mastertype=6).order_by('name')
+                
+                for item in all_items:
+                    item_rows = ItemParamDet.objects.filter(Item=item)
+                    
+                    # Apply filters
+                    if bcn:
+                        item_rows = item_rows.filter(BCN__icontains=bcn)
+                    if search:
+                        item_rows = item_rows.filter(
+                            Q(Item__name__icontains=search) |
+                            Q(BCN__icontains=search) |
+                            Q(C1__icontains=search) |
+                            Q(C2__icontains=search) |
+                            Q(C3__icontains=search) |
+                            Q(C4__icontains=search) |
+                            Q(C5__icontains=search)
+                        )
+                    
+                    item_opening = 0
+                    item_closing = 0
+                    
+                    for row in item_rows:
+                        qty = float(row.Value1 or 0)
+                        vch_type = str(row.VchType)
+                        
+                        # Opening qty only from VchType=1
+                        if vch_type == '1':
+                            item_opening += qty
+                        
+                        # All transactions contribute to closing
+                        item_closing += qty
+                    
+                    # Apply filters
+                    if search and search.lower() not in item.name.lower():
+                        continue
+                    if not show_zero_qty and item_closing == 0:
+                        continue
+                    
+                    results.append({
+                        'item': item,
+                        'opening_qty': round(item_opening, 2),
+                        'closing_qty': round(item_closing, 2),
+                    })
+                    total_opening_qty += item_opening
+                    total_closing_qty += item_closing
+    
+    except Exception as e:
+        error_message = f"Error generating report: {str(e)}"
+        results = []
 
     context = {
         'results': results,
-        'total_closing_qty': total_closing_qty,
-        'total_closing_val': total_closing_val,
+        'total_opening_qty': round(total_opening_qty, 2),
+        'total_closing_qty': round(total_closing_qty, 2),
         'search': search,
         'bcn': bcn,
-        'start_date': start_date,
-        'end_date': end_date,
         'show_zero_qty': show_zero_qty,
         'data_source': data_source,
+        'error_message': error_message,
+        'total_records': len(results),
     }
     return render(request, 'stockreport/item_param_summary_report.html', context)
